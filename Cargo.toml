@@ -1,0 +1,48 @@
+[package]
+# Basic package metadata
+name = "SignalDecryption"  # The name of your Rust package
+version = "0.1.0"          # The version of your package
+edition = "2021"           # The Rust edition your package is using (2024 is a placeholder, replace with "2021" if needed)
+authors = ["Your Name <your.email@example.com>"]  # Author information
+description = "A tool for encrypting and decrypting Signal keys"  # A short description of your package
+
+[dependencies]
+# Dependency on AES for encryption
+aes = "0.7.5"  # The AES crate, version 0.7.5
+
+# Dependency on block-modes for using block cipher modes of operation like CBC
+block-modes = "0.8.1"  # The block-modes crate, version 0.8.1
+
+# Dependency on PBKDF2 for key derivation
+pbkdf2 = { version = "0.10", features = ["std"] }  # The pbkdf2 crate, version 0.10 with the "std" feature enabled
+
+# Dependency on SHA1 for hashing
+sha1 = "0.10.1"  # The sha1 crate, version 0.10.1
+
+# Dependency on hex for encoding and decoding hexadecimal strings
+hex = "0.4.3"  # The hex crate, version 0.4.3
+
+# Dependency on serde_json for JSON handling
+serde_json = { version = "1.0.79", default-features = false, features = ["std"] }  # Enable `std` feature explicitly
+
+# Dependency on keyring for accessing the system keyring
+keyring = "1.2.0"  # The keyring crate, version 1.2.0
+
+# Dependency on HMAC for creating message authentication codes
+hmac = "0.12.1"  # The hmac crate, version 0.12.1
+
+rand = "0.8"  # Specify the version you want to use
+
+winapi = { version = "0.3", features = ["wincrypt", "dpapi", "winbase"] }
+
+[profile.release]
+# Release profile optimizations
+
+opt-level = 3  # Maximum optimization level for performance
+lto = "fat"  # Use "fat" link-time optimization for better performance at the cost of longer compile times
+codegen-units = 1  # Set to 1 to allow the compiler to optimize across the entire crate, improving performance but increasing compile time
+panic = 'abort'  # Abort on panic to reduce binary size by not including unwinding code
+strip = true  # Remove symbols from the final binary to reduce size
+debug = false  # Disable debug information to reduce binary size and remove source file references
+incremental = false  # Disable incremental compilation for release builds to improve runtime performance at the cost of longer compile times
+overflow-checks = false  # Disable overflow checks in release builds to improve performance; this should only be done if you're sure overflows won't occur
