@@ -35,22 +35,19 @@ struct OSCrypt {
 }
 
 impl OSCrypt {
-    /// Constructs a new `OSCrypt` instance.
+    /// Constructs a new `OSCrypt` instance using the provided secure password.
     ///
     /// # Arguments
     ///
-    /// * `service_name` - A string slice that holds the name of the service.
-    /// * `account_name` - A string slice that holds the account name.
-    /// * `config_path` - An optional string slice that specifies the path to the configuration file.
+    /// * `encrypted_key` - The encrypted key as a string.
+    /// * `secure_password` - The secure password retrieved from Keychain.
     ///
     /// # Returns
     ///
-    /// A Result containing either a new `OSCrypt` instance or an error.
-    fn new(service_name: &str, account_name: &str, config_path: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let encrypted_key = Self::load_encrypted_key(config_path)?; // Load encrypted key
-        let secure_password = Self::get_secure_storage_password(service_name, account_name)?; // Retrieve password from secure storage
-        let aes_key = Self::derive_key(&secure_password); // Derive AES key from the password
-        Ok(Self { encrypted_key, aes_key }) // Return a new OSCrypt instance
+    /// An instance of `OSCrypt` with the derived AES key.
+    fn new_with_password(encrypted_key: String, secure_password: &str) -> Self {
+        let aes_key = Self::derive_key(secure_password);
+        Self { encrypted_key, aes_key }
     }
 
     /// Loads the encrypted key from a specified path or default path.
@@ -133,20 +130,26 @@ impl OSCrypt {
 
     /// Encrypts a plaintext string using the derived AES key.
     ///
+    /// This implementation uses a fixed IV (16 space characters) as required by the macOS OS_Crypt logic.
+    ///
     /// # Arguments
     ///
-    /// * `plaintext` - A string slice that represents the plaintext to be encrypted.
+    /// * `plaintext` - A string slice representing the plaintext to be encrypted.
     ///
     /// # Returns
     ///
-    /// A Result containing either the encrypted string in hex format or an error.
+    /// A `Result` containing the encrypted string in hex format or an error.
     fn encrypt_string(&self, plaintext: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let iv = Self::generate_iv(); // Generate a random IV
-        let cipher = Aes128Cbc::new_from_slices(&self.aes_key, &iv)?; // Create AES-CBC cipher with key and IV
-        let mut result = ENCRYPTION_VERSION_PREFIX.as_bytes().to_vec(); // Start result with version prefix
-        result.extend_from_slice(&iv); // Append IV to result
-        result.extend_from_slice(&cipher.encrypt_vec(plaintext.as_bytes())); // Encrypt the plaintext and append ciphertext
-        Ok(encode(result)) // Return the hex-encoded result
+        // Use a fixed IV of 16 space characters.
+        let iv = [b' '; KEY_LENGTH];
+        let cipher = Aes128Cbc::new_from_slices(&self.aes_key, &iv)?;
+        // Encrypt the plaintext using AES-128 in CBC mode.
+        let encrypted_data = cipher.encrypt_vec(plaintext.as_bytes());
+        // Prepend the encryption version prefix to the ciphertext.
+        let mut result = ENCRYPTION_VERSION_PREFIX.as_bytes().to_vec();
+        result.extend_from_slice(&encrypted_data);
+        // Return the hex-encoded encrypted string.
+        Ok(encode(result))
     }
 
     /// Decrypts a hex-encoded encrypted string using the derived AES key.
@@ -164,24 +167,29 @@ impl OSCrypt {
             return Err("Invalid encryption version prefix".into()); // Validate encryption version prefix
         }
 
-        let iv_end = ENCRYPTION_VERSION_PREFIX.len() + KEY_LENGTH; // Calculate end of IV in data
-        let iv = &encrypted_data[ENCRYPTION_VERSION_PREFIX.len()..iv_end]; // Extract IV
-        let encrypted_text = &encrypted_data[iv_end..]; // Extract encrypted text
-
-        let cipher = Aes128Cbc::new_from_slices(&self.aes_key, iv)?; // Create AES-CBC cipher with extracted IV
+        let encrypted_text = &encrypted_data[ENCRYPTION_VERSION_PREFIX.len()..]; // Extract encrypted text
+        // Create AES-CBC cipher with empty IV
+        // https://chromium.googlesource.com/chromium/src/+/refs/tags/130.0.6686.2/components/os_crypt/sync/os_crypt_mac.mm#208
+        let cipher = Aes128Cbc::new_from_slices(&self.aes_key, &[b' '; KEY_LENGTH])?; 
         let decrypted = cipher.decrypt_vec(encrypted_text)?; // Decrypt the text
         String::from_utf8(decrypted).map_err(|e| e.into()) // Convert decrypted bytes to a UTF-8 string
     }
+}
 
-    /// Generates a random initialization vector (IV) for encryption.
-    ///
-    /// # Returns
-    ///
-    /// A random IV as a byte array.
-    fn generate_iv() -> [u8; KEY_LENGTH] {
-        let mut iv = [0u8; KEY_LENGTH]; // Initialize IV buffer
-        rand::thread_rng().fill(&mut iv); // Fill IV with random bytes
-        iv // Return the generated IV
+/// Retrieves a secure password by first trying "Signal Key" and falling back to "Signal" if not found.
+///
+/// # Arguments
+///
+/// * `service_name` - The Keychain service name.
+///
+/// # Returns
+///
+/// A Result containing the secure password or an error.
+fn get_secure_password_fallback(service_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if let Ok(password) = OSCrypt::get_secure_storage_password(service_name, "Signal Key") {
+        Ok(password)
+    } else {
+        OSCrypt::get_secure_storage_password(service_name, "Signal")
     }
 }
 
@@ -249,35 +257,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    // Retrieve and optionally print the secure storage password
-    let secure_password = match OSCrypt::get_secure_storage_password("Signal Safe Storage", "Signal Key") {
-        Ok(password) => {
-            if print_secure_key {
-                println!("Secure key retrieved: {}", password);
-            }
-            password
-        },
-        Err(e) => {
-            println!("Failed to retrieve secure key: {}", e);
-            return Err(e.into());
-        }
-    };
+    // Retrieve the secure password using the fallback approach:
+    // First try "Signal Key"; if not found, try "Signal".
+    let secure_password = get_secure_password_fallback("Signal Safe Storage")?;
+    if print_secure_key {
+        println!("Secure password retrieved: {}", secure_password);
+    }
 
-    // Initialize OSCrypt based on provided options
-    let os_crypt = if let Some(key) = encrypted_key {
-        println!("Using directly provided encrypted key");
-        let aes_key = OSCrypt::derive_key(&secure_password);
-        OSCrypt {
-            encrypted_key: key,
-            aes_key,
-        }
+    // Retrieve the encrypted key either from CLI or from the configuration file.
+    let encrypted_key_str = if let Some(key) = encrypted_key {
+        println!("Using directly provided encrypted key.");
+        key
     } else {
-        OSCrypt::new("Signal Safe Storage", "Signal Key", config_path.as_deref())?
+        OSCrypt::load_encrypted_key(config_path.as_deref())?
     };
 
-    println!("Encrypted key: {}", os_crypt.encrypted_key); // Print the encrypted key
-    let decrypted = os_crypt.decrypt_string(&os_crypt.encrypted_key)?; // Decrypt the key
-    println!("Decrypted key: {}", decrypted); // Print the decrypted key
+    // Construct the OSCrypt instance using the retrieved secure password.
+    let os_crypt = OSCrypt::new_with_password(encrypted_key_str, &secure_password);
+
+    println!("Encrypted key: {}", os_crypt.encrypted_key);
+    let decrypted = os_crypt.decrypt_string(&os_crypt.encrypted_key)?;
+    println!("Decrypted key: {}", decrypted);
 
     Ok(())
 }
