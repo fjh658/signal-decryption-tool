@@ -31,6 +31,12 @@ Both share a `signal_core` library that recovers the key by implementing Chromiu
 - 📦 Decrypts Signal **Android encrypted backups** (`--backup`, no root needed) in pure Rust, rebuilt in memory
 - 🤖 `signal-sqlite mcp` exposes the database to AI agents as a read-only MCP server (recovers the key once; `SELECT`-only, `ATTACH` disabled, results capped)
 
+## Architecture 🏗️
+
+[![Architecture diagram](docs/architecture.en.png)](docs/architecture.en.html)
+
+The high-level data flow — the two CLI binaries (`SignalDecryption` prints the recovered key, `signal-sqlite` queries), the pure-Rust key recovery and Android `.backup` decryption in `signal_core`, SQLCipher opening the live database read-only (and an in-memory mount for backups), and the query / MCP output layer. Open the [interactive diagram](docs/architecture.en.html) for zoom, per-node source links, and light/dark themes.
+
 ## Prerequisites 📋
 
 - 🖥️ macOS operating system

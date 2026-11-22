@@ -31,6 +31,12 @@
 - 📦 纯 Rust 解密 Signal **Android 加密备份**(`--backup`,无需 root),全程在内存里重建
 - 🤖 `signal-sqlite mcp` 以只读 MCP server 把数据库暴露给 AI agent(只恢复一次密钥;仅 `SELECT`、禁 `ATTACH`、结果封顶)
 
+## 架构 🏗️
+
+[![架构图](docs/architecture.zh.png)](docs/architecture.zh.html)
+
+总体数据流:两个命令行二进制(`SignalDecryption` 打印恢复出的 key,`signal-sqlite` 查询)、`signal_core` 里纯 Rust 的密钥恢复和 Android `.backup` 解密、以只读方式打开实时数据库的 SQLCipher(备份则挂载在内存里),以及查询 / MCP 输出层。打开[交互式架构图](docs/architecture.zh.html)可缩放、查看每个节点的源码链接、切换明暗主题。
+
 ## 前提条件 📋
 
 - 🖥️ macOS、Windows 或 Linux 操作系统
