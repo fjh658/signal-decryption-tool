@@ -28,7 +28,12 @@ fn run() -> Result<()> {
     // The shared flow lives here, once: open the database (recovering the key
     // and decrypting) before dispatching. Every command runs against the open
     // connection; no command opens its own.
-    let mut database = db::open(cli.config.as_deref(), cli.db.as_deref(), cli.key.as_deref())?;
+    let mut database = db::open(
+        cli.config.as_deref(),
+        cli.db.as_deref(),
+        cli.key.as_deref(),
+        cli.cipher,
+    )?;
 
     // No subcommand drops into the interactive prompt (like `sqlite3`).
     let command = cli.command.unwrap_or_else(|| Commands::Repl(ReplArgs::default()));

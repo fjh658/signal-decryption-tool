@@ -9,6 +9,8 @@ use rusqlite::{Connection, ErrorCode, OpenFlags};
 use signal_core::error::Error;
 use signal_core::{platform, recover_key, Result};
 
+use crate::cli::CipherArg;
+
 /// How long a statement waits for a lock a writer holds. WAL readers rarely
 /// wait; this covers a connection that is just recovering the WAL index.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,31 +39,44 @@ pub struct SignalDb {
 ///
 /// * `config_path` - Signal Desktop's `config.json` (default location if `None`).
 /// * `db_override`  - explicit database path (default `<config dir>/sql/db.sqlite`).
-/// * `key_override` - the 64-hex key to use instead of recovering one.
+/// * `key_override` - the key to use instead of recovering one (64 hex for
+///   desktop/android, 96 hex for ios).
+/// * `cipher` - which Signal client's SQLCipher settings to open it with.
+///
+/// Only Desktop can auto-recover its key and default its path from the config;
+/// iOS/Android have no key to recover on this machine, so they require an
+/// explicit `--key` and `--db` (the key is extracted on the device).
 pub fn open(
     config_path: Option<&str>,
     db_override: Option<&str>,
     key_override: Option<&str>,
+    cipher: CipherArg,
 ) -> Result<SignalDb> {
     // The user never sees or handles the key.
-    let key_hex = match key_override {
-        Some(hex) => hex.to_string(),
-        None => recover_key(Some(&resolve_config(config_path)?))?,
+    let key_hex = match (key_override, cipher) {
+        (Some(hex), _) => hex.to_string(),
+        (None, CipherArg::Desktop) => recover_key(Some(&resolve_config(config_path)?))?,
+        (None, _) => {
+            return Err("iOS/Android databases need an explicit --key (extract it on the device; there is nothing to auto-recover here)".into());
+        }
     };
 
-    let db_path = match db_override {
-        Some(path) => PathBuf::from(path),
-        None => default_db_path(&resolve_config(config_path)?),
+    let db_path = match (db_override, cipher) {
+        (Some(path), _) => PathBuf::from(path),
+        (None, CipherArg::Desktop) => default_db_path(&resolve_config(config_path)?),
+        (None, _) => {
+            return Err("iOS/Android databases need an explicit --db (the path to the extracted database file)".into());
+        }
     };
     std::fs::metadata(&db_path).map_err(|e| Error::from_io(e, "database", &db_path, DB_HINT))?;
-    let pragmas = key_pragmas(key_hex.trim())?;
+    let pragmas = key_pragmas(key_hex.trim(), cipher)?;
 
     let (conn, first_read) = connect(&db_path, &pragmas)?;
     // The first read decrypts page 1: a wrong key fails here, not mid-query.
     if let Err(err) = first_read {
         return Err(match err.sqlite_error_code() {
             Some(ErrorCode::NotADatabase) => format!(
-                "cannot decrypt {}: wrong key, or not a Signal database",
+                "cannot decrypt {}: wrong key (or --cipher), or not a Signal database",
                 db_path.display()
             )
             .into(),
@@ -160,14 +175,25 @@ fn read_only_uri(path: &Path, vfs: Option<&str>) -> Result<String> {
     })
 }
 
-/// The keying PRAGMA Signal Desktop issues for its database (the same one
-/// src/testdata/gen_wal_fixtures.sh uses to create the fixtures). The key is
-/// checked to be hex before it is put into the PRAGMA.
-fn key_pragmas(key_hex: &str) -> Result<String> {
-    if key_hex.len() != 64 || !key_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("desktop key must be 64 hex characters (32 bytes)".into());
+/// The keying PRAGMAs each Signal client issues for its database (the same
+/// ones src/testdata/gen_wal_fixtures.sh uses to create the fixtures). The key
+/// is checked to be hex before it is put into the PRAGMA.
+fn key_pragmas(key_hex: &str, cipher: CipherArg) -> Result<String> {
+    let (len, what) = match cipher {
+        CipherArg::Desktop => (64, "desktop key must be 64 hex characters (32 bytes)"),
+        CipherArg::Ios => (96, "iOS key must be 96 hex characters (48-byte keyspec: 32-byte key + 16-byte salt)"),
+        CipherArg::Android => (64, "Android key must be 64 hex characters (the DatabaseSecret.asHex() value)"),
+    };
+    if key_hex.len() != len || !key_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(what.into());
     }
-    Ok(format!("PRAGMA key = \"x'{key_hex}'\";"))
+    Ok(match cipher {
+        CipherArg::Desktop => format!("PRAGMA key = \"x'{key_hex}'\";"),
+        CipherArg::Ios => format!("PRAGMA key = \"x'{key_hex}'\"; PRAGMA cipher_plaintext_header_size = 32;"),
+        CipherArg::Android => format!(
+            "PRAGMA key = '{key_hex}'; PRAGMA cipher_compatibility = 3; PRAGMA kdf_iter = 1; PRAGMA cipher_page_size = 4096;"
+        ),
+    })
 }
 
 /// Resolves the config path, defaulting to the platform location.
@@ -194,10 +220,13 @@ mod tests {
     #[test]
     fn key_pragmas_take_only_hex_of_the_right_length() {
         let key = "ab".repeat(32);
-        assert_eq!(key_pragmas(&key).unwrap(), format!("PRAGMA key = \"x'{key}'\";"));
+        assert_eq!(key_pragmas(&key, CipherArg::Desktop).unwrap(), format!("PRAGMA key = \"x'{key}'\";"));
+        assert!(key_pragmas(&"ab".repeat(48), CipherArg::Ios).unwrap().contains("cipher_plaintext_header_size = 32"));
+        assert!(key_pragmas(&key, CipherArg::Android).unwrap().contains("cipher_compatibility = 3"));
         for bad in [&"ab".repeat(31), &format!("{}'z", "ab".repeat(31)), &"zz".repeat(32)] {
-            assert!(key_pragmas(bad).is_err(), "{bad:?} must be rejected");
+            assert!(key_pragmas(bad, CipherArg::Desktop).is_err(), "{bad:?} must be rejected");
         }
+        assert!(key_pragmas(&key, CipherArg::Ios).is_err(), "iOS needs 96 hex characters");
     }
 
     #[test]
@@ -216,7 +245,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let copy = dir.join("enc.sqlite");
         std::fs::copy(&src, &copy).unwrap();
-        let db = open(None, copy.to_str(), Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")).unwrap();
+        let db = open(None, copy.to_str(), Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), CipherArg::Desktop).unwrap();
         // Even with query_only lifted, as `export` does, the source stays read-only.
         let write = db.conn.execute_batch("PRAGMA query_only = OFF; INSERT INTO items(name) VALUES ('x');");
         let before = std::fs::read(&src).unwrap();

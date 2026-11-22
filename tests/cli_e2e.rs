@@ -302,7 +302,7 @@ fn export_beyond_max_path_works_with_and_without_force() {
 fn wal_sidecar_is_replayed_through_the_cli() {
     // desktop_wal.sqlite holds alpha+beta; gamma and the `wal_only` table were
     // committed to desktop_wal.sqlite-wal (whose first frame is page 1).
-    let db = fixture_copy("desktop_wal.sqlite");
+    let db = testdata("desktop_wal.sqlite");
     let out = Command::new(BIN)
         .args(["-d", db.to_str().unwrap(), "-k", FIXTURE_KEY])
         .args(["query", "SELECT name FROM items UNION ALL SELECT name FROM sqlite_schema WHERE name = 'wal_only'"])
@@ -413,7 +413,38 @@ fn json_output_maps_non_finite_reals_to_null() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), r#"[{"pinf":null,"ninf":null,"x":1.5}]"#);
 }
 
+// --- mobile cipher profiles (iOS / Android) against their fixtures ----------
+
+/// iOS 96-hex keyspec and Android 64-hex passphrase for the committed fixtures
+/// (`KEY32` and `SALT16` in `src/testdata/gen_wal_fixtures.sh`).
+const IOS_FIXTURE_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
+const ANDROID_FIXTURE_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+fn testdata(name: &str) -> PathBuf {
+    fixture_copy(name)
+}
+
 // --- the database engine reads exactly what Signal wrote ---------------------
+
+/// The 96-hex keyspec the iOS WAL fixture was made with (key then salt).
+const IOS_WAL_KEY: &str = IOS_FIXTURE_KEY;
+
+#[test]
+fn mobile_wal_sidecars_are_replayed_through_the_cli() {
+    for (name, key, cipher) in [("ios_wal.sqlite", IOS_WAL_KEY, "ios"), ("android_wal.sqlite", ANDROID_FIXTURE_KEY, "android")] {
+        let db = testdata(name);
+        let out = Command::new(BIN)
+            .args(["-d", db.to_str().unwrap(), "-k", key, "--cipher", cipher])
+            .args(["query", "SELECT name FROM items UNION ALL SELECT name FROM sqlite_schema WHERE name = 'wal_only'"])
+            .output()
+            .expect("spawn");
+        assert!(out.status.success(), "{cipher}: {}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for row in ["alpha", "beta", "gamma", "wal_only"] {
+            assert!(stdout.contains(row), "{cipher}: missing '{row}':\n{stdout}");
+        }
+    }
+}
 
 #[test]
 fn wrong_key_is_reported_as_such() {
@@ -442,7 +473,7 @@ fn a_key_that_is_not_hex_is_rejected_before_use() {
 
 #[test]
 fn reading_never_changes_the_database_or_its_wal() {
-    let db = fixture_copy("desktop_wal.sqlite");
+    let db = testdata("desktop_wal.sqlite");
     let digest = |p: &PathBuf| std::fs::read(p).unwrap();
     let wal = PathBuf::from(format!("{}-wal", db.display()));
     let (before_db, before_wal) = (digest(&db), digest(&wal));
@@ -452,4 +483,47 @@ fn reading_never_changes_the_database_or_its_wal() {
         .expect("spawn");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(digest(&db) == before_db && digest(&wal) == before_wal, "the database or its WAL changed");
+}
+
+#[test]
+fn ios_profile_queries_through_the_cli() {
+    let db = testdata("ios_enc.sqlite");
+    let out = Command::new(BIN)
+        .args(["-d", db.to_str().unwrap(), "-k", IOS_FIXTURE_KEY, "--cipher", "ios"])
+        .args(["query", "SELECT name FROM items ORDER BY id"])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for name in ["alpha", "beta", "gamma"] {
+        assert!(stdout.contains(name), "missing '{name}':\n{stdout}");
+    }
+}
+
+#[test]
+fn android_profile_queries_through_the_cli() {
+    let db = testdata("android_enc.sqlite");
+    let out = Command::new(BIN)
+        .args(["-d", db.to_str().unwrap(), "-k", ANDROID_FIXTURE_KEY, "--cipher", "android"])
+        .args(["query", "SELECT name FROM items ORDER BY id"])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for name in ["alpha", "beta", "gamma"] {
+        assert!(stdout.contains(name), "missing '{name}':\n{stdout}");
+    }
+}
+
+#[test]
+fn mobile_cipher_without_key_is_an_error() {
+    // A mobile profile has nothing to auto-recover, so a missing --key must fail
+    // cleanly rather than trying the desktop keychain path.
+    let db = testdata("ios_enc.sqlite");
+    let out = Command::new(BIN)
+        .args(["-d", db.to_str().unwrap(), "--cipher", "ios", "tables"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "mobile cipher without --key should fail");
+    assert!(String::from_utf8_lossy(&out.stderr).to_lowercase().contains("key"));
 }

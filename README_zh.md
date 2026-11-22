@@ -213,6 +213,20 @@ signal-sqlite --help                  # 完整帮助;`signal-sqlite help <命令
 >
 > **全文检索表:** Signal 的消息正文在 `messages` 表里;`messages_fts` 等是用 Signal 自带的 `signal_tokenizer` 声明的 FTS5 检索索引,而该分词器只存在于 Signal 进程内。`signal-sqlite` 会把这个分词器名注册为内置 `unicode61` 的别名,使这些表能打开、能读取(`MATCH` 以 unicode61 语义工作,与 Signal 的接近)。
 
+### 移动端数据库 —— iOS 与 Android 📱
+
+`signal-sqlite` 不止能开 Desktop,也能开 Signal **iOS** 和 **Android** 的数据库。它们用不同的 SQLCipher profile,而且——与 Desktop 不同——**密钥无法在本机恢复**(iOS 把它放在仅限本设备的 keychain 项里;Android 把它封在硬件背书的 Keystore 里)。你需要**自己在设备上取出密钥**(比如越狱的 iPhone、已 root 的 Android,用 Frida),再用 `--cipher` + `--key` 让 `signal-sqlite` 指向数据库文件:
+
+```
+# iOS:96 位 hex keyspec(32 字节 key + 16 字节 salt),来自设备 keychain
+signal-sqlite --cipher ios     -d Signal.sqlite -k <96位hex-keyspec> query "SELECT * FROM ..."
+
+# Android:64 位 hex 的 DatabaseSecret(SQLCipher 当作 passphrase 的那个值)
+signal-sqlite --cipher android -d signal.db     -k <64位hex-secret>  tables
+```
+
+`--cipher ios`/`android` 都**必须显式给 `-k`/`--key` 和 `-d`/`--db`**(本机没有可自动恢复的东西)。开库之后,所有命令照常用——`query`、`tables`、`schema`、`repl`、`mcp`、`export`。SQLCipher 按各客户端自己的设置打开它们(iOS:SQLCipher 4 加 32 字节明文头;Android:SQLCipher 3 兼容模式);测试 fixture 由 SQLCipher 4.20.0 按这些设置生成。**从现代设备上取出密钥需要设备上的访问权限(越狱 / root);普通数据线既读不到被封装的密钥,也读不到沙盒里的数据库**——这是 Signal 的设计,不是本工具的局限。
+
 ### 作为 MCP server 对接 AI agent 🤖
 
 `signal-sqlite mcp` 以 stdio 运行一个**只读**的 [Model Context Protocol](https://modelcontextprotocol.io) server,让支持 MCP 的 agent 用自然语言查询你的 Signal 历史。它在进程生命周期内**只恢复一次密钥**——因此不像逐条命令那样每次查询都重新弹系统钥匙串——以只读方式保持数据库打开,并暴露四个只读工具:

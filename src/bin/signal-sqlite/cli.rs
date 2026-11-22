@@ -33,12 +33,32 @@ pub struct Cli {
     #[arg(short = 'd', long, global = true, value_name = "PATH")]
     pub db: Option<String>,
 
-    /// Use this 64-hex key directly, skipping automatic recovery.
+    /// Use this key directly, skipping automatic recovery (64 hex for
+    /// desktop/android, 96 hex for ios). Required for --cipher ios/android.
     #[arg(short = 'k', long, global = true, value_name = "HEX")]
     pub key: Option<String>,
 
+    /// Which Signal client produced the database (selects the SQLCipher profile).
+    /// `ios`/`android` need an explicit --key and --db (there is no key to
+    /// auto-recover on this machine; extract it on the device).
+    #[arg(long, global = true, value_enum, default_value_t = CipherArg::Desktop)]
+    pub cipher: CipherArg,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+/// Which Signal client produced the database; selects the SQLCipher keying
+/// PRAGMAs in `db.rs`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CipherArg {
+    /// Signal Desktop (raw key recovered from the OS keychain by default).
+    #[default]
+    Desktop,
+    /// Signal iOS (48-byte keyspec, 96-hex key; from a jailbroken device).
+    Ios,
+    /// Signal Android (64-hex passphrase, SQLCipher 3; key extracted on a rooted device).
+    Android,
 }
 
 /// The subcommand registry. One variant per mode.
@@ -271,6 +291,13 @@ mod tests {
         // `global = true` lets them follow the subcommand too.
         let cli = parse(&["tables", "-k", "00"]);
         assert_eq!(cli.key.as_deref(), Some("00"));
+    }
+
+    #[test]
+    fn cipher_defaults_to_desktop_and_parses_mobile() {
+        assert_eq!(parse(&["tables"]).cipher, CipherArg::Desktop);
+        assert_eq!(parse(&["--cipher", "ios", "tables"]).cipher, CipherArg::Ios);
+        assert_eq!(parse(&["tables", "--cipher", "android"]).cipher, CipherArg::Android);
     }
 
     #[test]

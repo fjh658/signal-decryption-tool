@@ -15,12 +15,15 @@ set -euo pipefail
 
 readonly OUT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly KEY32="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+readonly SALT16="202122232425262728292a2b2c2d2e2f"
 
 # Profile table: "<name>|<key + cipher PRAGMAs, run right after opening>".
 # These mirror the PRAGMAs each Signal client issues (see key_pragmas in
 # src/bin/signal-sqlite/db.rs, which signal-sqlite uses to open them).
 readonly PROFILES=(
   "desktop|PRAGMA key = \"x'${KEY32}'\";"
+  "ios|PRAGMA key = \"x'${KEY32}${SALT16}'\"; PRAGMA cipher_plaintext_header_size = 32;"
+  "android|PRAGMA key = '${KEY32}'; PRAGMA cipher_compatibility = 3; PRAGMA kdf_iter = 1; PRAGMA cipher_page_size = 4096;"
 )
 
 # Creates the main database in rollback mode, then switches it to WAL.

@@ -213,6 +213,20 @@ signal-sqlite --help                  # full help; `signal-sqlite help <cmd>` pe
 >
 > **Full-text tables:** Signal's message text lives in the `messages` table; `messages_fts` and friends are FTS5 search indexes declared with Signal's custom `signal_tokenizer`, which only exists inside Signal. `signal-sqlite` registers that tokenizer name as an alias for SQLite's built-in `unicode61` so those tables open and can be read (and `MATCH` works with unicode61 semantics, close to Signal's).
 
+### Mobile databases — iOS and Android 📱
+
+`signal-sqlite` can also open Signal **iOS** and **Android** databases, not just Desktop. These use a different SQLCipher profile and — unlike Desktop — their key is **not recoverable on this machine** (iOS keeps it in a device-only keychain item; Android seals it in the hardware-backed Keystore). You extract the key on the device yourself (e.g. a jailbroken iPhone or rooted Android, via Frida), then point `signal-sqlite` at the database file with `--cipher` and `--key`:
+
+```
+# iOS: 96-hex keyspec (32-byte key + 16-byte salt), from the device keychain
+signal-sqlite --cipher ios     -d Signal.sqlite -k <96-hex-keyspec> query "SELECT * FROM ..."
+
+# Android: the 64-hex DatabaseSecret (the value SQLCipher uses as its passphrase)
+signal-sqlite --cipher android -d signal.db     -k <64-hex-secret>  tables
+```
+
+`--cipher ios`/`android` both require an explicit `-k`/`--key` and `-d`/`--db` (there is nothing to auto-recover here). Once open, every command works the same — `query`, `tables`, `schema`, `repl`, `mcp`, `export`. SQLCipher opens them with the same settings each client uses (SQLCipher 4 with a 32-byte plaintext header for iOS, SQLCipher 3 compatibility for Android); the test fixtures were made by SQLCipher 4.20.0 with those settings. **Getting the key off a modern device requires on-device access (jailbreak / root); a plain USB cable cannot read the sealed key or the sandboxed database** — that is Signal's design, not a limitation of this tool.
+
 ### signal-sqlite as an MCP server (AI agents) 🤖
 
 `signal-sqlite mcp` runs as a read-only [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, so an MCP-capable agent can query your Signal history conversationally. It recovers the key **once** for the life of the process — so, unlike per-command runs, it does not re-prompt the OS keychain on every query — keeps the database open read-only, and exposes four read-only tools:
