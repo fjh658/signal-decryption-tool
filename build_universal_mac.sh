@@ -1,54 +1,65 @@
 #!/bin/bash
+#
+# Build macOS universal binaries (x86_64 + arm64) for both tools.
+#
+# `signal-sqlite` needs the `sqlite` feature (SQLCipher); it is built
+# alongside `SignalDecryption` and lipo'd into a universal binary each.
 
-# Ensure necessary targets are installed
-echo "Adding required Rust targets..."
-rustup target add x86_64-apple-darwin aarch64-apple-darwin
+set -euo pipefail
 
-# Set the output directory
-OUTPUT_DIR="target/universal"
-mkdir -p $OUTPUT_DIR
+# ---- Configuration (named constants) ----------------------------------------
 
-# Build for x86_64 with additional link arguments to strip symbols
-echo "Building for x86_64..."
-cargo build --release --target x86_64-apple-darwin
-if [ $? -ne 0 ]; then
-    echo "Failed to build for x86_64."
-    exit 1
-fi
+readonly OUTPUT_DIR="target/universal"
+readonly PROFILE="release"
+readonly ARCHES=("x86_64-apple-darwin" "aarch64-apple-darwin")
+readonly BINARIES=("SignalDecryption" "signal-sqlite")
 
-# Build for aarch64 with additional link arguments to strip symbols
-echo "Building for aarch64..."
-cargo build --release --target aarch64-apple-darwin
-if [ $? -ne 0 ]; then
-    echo "Failed to build for aarch64."
-    exit 1
-fi
+# ---- Pure helpers -----------------------------------------------------------
 
-# Check if the binaries exist
-if [ ! -f "target/x86_64-apple-darwin/release/SignalDecryption" ]; then
-    echo "x86_64 binary not found!"
-    exit 1
-fi
+arch_bin_path() {
+    local arch="$1" bin="$2"
+    echo "target/${arch}/${PROFILE}/${bin}"
+}
 
-if [ ! -f "target/aarch64-apple-darwin/release/SignalDecryption" ]; then
-    echo "aarch64 binary not found!"
-    exit 1
-fi
+# ---- Guarded actions --------------------------------------------------------
 
-# Strip debug symbols more aggressively
-echo "Stripping debug symbols..."
-strip -S -x target/x86_64-apple-darwin/release/SignalDecryption
-strip -S -x target/aarch64-apple-darwin/release/SignalDecryption
+require_targets() {
+    echo "Adding required Rust targets..."
+    rustup target add "${ARCHES[@]}"
+}
 
-# Use lipo to create a universal binary
-echo "Creating universal binary..."
-lipo -create -output $OUTPUT_DIR/SignalDecryption \
-    target/x86_64-apple-darwin/release/SignalDecryption \
-    target/aarch64-apple-darwin/release/SignalDecryption
+build_arch() {
+    local arch="$1"
+    echo "Building for ${arch}..."
+    cargo build --${PROFILE} --features sqlite --target "${arch}"
+}
 
-if [ $? -eq 0 ]; then
-    echo "Universal binary created at $OUTPUT_DIR/SignalDecryption"
-else
-    echo "Failed to create universal binary."
-    exit 1
-fi
+# Lipo one binary across all arches into a universal output.
+lipo_binary() {
+    local bin="$1" inputs=() arch src
+    for arch in "${ARCHES[@]}"; do
+        src="$(arch_bin_path "${arch}" "${bin}")"
+        [ -f "${src}" ] || { echo "error: expected binary not found: ${src}" >&2; exit 1; }
+        strip -S -x "${src}"
+        inputs+=("${src}")
+    done
+    lipo -create -output "${OUTPUT_DIR}/${bin}" "${inputs[@]}"
+    echo "  -> ${OUTPUT_DIR}/${bin}"
+}
+
+# ---- Composition ------------------------------------------------------------
+
+main() {
+    require_targets
+    mkdir -p "${OUTPUT_DIR}"
+    for arch in "${ARCHES[@]}"; do
+        build_arch "${arch}"
+    done
+    echo "Creating universal binaries..."
+    for bin in "${BINARIES[@]}"; do
+        lipo_binary "${bin}"
+    done
+    echo "Universal binaries created in ${OUTPUT_DIR}/"
+}
+
+main "$@"

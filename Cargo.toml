@@ -1,39 +1,64 @@
 [package]
 # Basic package metadata
 name = "SignalDecryption"  # The name of your Rust package
-version = "0.1.0"          # The version of your package
-edition = "2021"           # The Rust edition your package is using (2024 is a placeholder, replace with "2021" if needed)
-authors = ["Your Name <your.email@example.com>"]  # Author information
-description = "A tool for encrypting and decrypting Signal keys"  # A short description of your package
+version = "1.1.0"          # The version of your package
+edition = "2021"           # The Rust edition your package is using
+authors = ["John Feng"]  # Author information
+description = "Recover and query Signal Desktop's SQLCipher key on macOS, Windows and Linux"
+autobins = false           # bins are declared explicitly below
+
+# Shared library: the key-recovery core, used by both binaries.
+[lib]
+name = "signal_core"
+path = "src/lib.rs"
+
+# Binary 1: print the recovered key.
+[[bin]]
+name = "SignalDecryption"
+path = "src/bin/SignalDecryption/main.rs"
 
 [dependencies]
-# Dependency on AES for encryption
-aes = "0.7.5"  # The AES crate, version 0.7.5
-
-# Dependency on block-modes for using block cipher modes of operation like CBC
-block-modes = "0.8.1"  # The block-modes crate, version 0.8.1
-
-# Dependency on PBKDF2 for key derivation
-pbkdf2 = { version = "0.10", features = ["std"] }  # The pbkdf2 crate, version 0.10 with the "std" feature enabled
-
-# Dependency on SHA1 for hashing
-sha1 = "0.10.1"  # The sha1 crate, version 0.10.1
+# Cross-platform dependencies (used by every target)
 
 # Dependency on hex for encoding and decoding hexadecimal strings
 hex = "0.4.3"  # The hex crate, version 0.4.3
 
 # Dependency on serde_json for JSON handling
-serde_json = { version = "1.0.79", default-features = false, features = ["std"] }  # Enable `std` feature explicitly
+serde_json = { version = "1.0", default-features = false, features = ["std"] }  # Enable `std` feature explicitly
 
-# Dependency on keyring for accessing the system keyring
+# --- Shared RustCrypto primitives ---
+# os_crypt (macOS/Linux) uses AES-128-CBC + PBKDF2-SHA1.
+aes = "0.7.5"                                           # AES block cipher (128 + 256)
+block-modes = "0.8.1"                                   # CBC mode
+pbkdf2 = { version = "0.10", features = ["std"] }       # PBKDF2 key derivation
+hmac = "0.12.1"                                          # HMAC (SHA1)
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# os_crypt PRF (macOS/Linux only): PBKDF2-HMAC-SHA1.
+sha1 = "0.10.1"  # The sha1 crate, version 0.10.1
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS backend: master password lives in the Keychain
+
+# Access to the system Keychain
 keyring = "1.2.0"  # The keyring crate, version 1.2.0
 
-# Dependency on HMAC for creating message authentication codes
-hmac = "0.12.1"  # The hmac crate, version 0.12.1
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux backend: v11 master password lives in the Secret Service (libsecret).
+# Pure-Rust D-Bus client (zbus) + RustCrypto session, no C libsecret linkage.
+secret-service = { version = "4", features = ["rt-async-io-crypto-rust"] }
 
-rand = "0.8"  # Specify the version you want to use
+[target.'cfg(windows)'.dependencies]
+# Windows backend: DPAPI (Local State) -> AES-256-GCM (config.json)
 
-winapi = { version = "0.3", features = ["wincrypt", "dpapi", "winbase"] }
+# AES-256-GCM authenticated decryption
+aes-gcm = "0.10"  # The aes-gcm crate, version 0.10
+
+# base64 for decoding os_crypt.encrypted_key in Local State
+base64 = "0.22"  # The base64 crate, version 0.22
+
+# Win32 DPAPI bindings (CryptUnprotectData) and LocalFree
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [profile.release]
 # Release profile optimizations

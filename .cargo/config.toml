@@ -1,0 +1,6 @@
+# Link the C runtime statically into every Windows build, so the executables
+# run on a clean Windows without the Visual C++ Redistributable
+# (vcruntime140.dll and the api-ms-win-crt-* UCRT forwarders).
+# package.sh refuses to ship an exe that imports anything but system DLLs.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
