@@ -17,6 +17,12 @@ path = "src/lib.rs"
 name = "SignalDecryption"
 path = "src/bin/SignalDecryption/main.rs"
 
+# Binary 2: open Signal's database with the recovered key and run SQL.
+[[bin]]
+name = "signal-sqlite"
+path = "src/bin/signal-sqlite/main.rs"
+required-features = ["sqlite"]
+
 [dependencies]
 # Cross-platform dependencies (used by every target)
 
@@ -32,6 +38,25 @@ aes = "0.7.5"                                           # AES block cipher (128 
 block-modes = "0.8.1"                                   # CBC mode
 pbkdf2 = { version = "0.10", features = ["std"] }       # PBKDF2 key derivation
 hmac = "0.12.1"                                          # HMAC (SHA1)
+
+# SQLCipher for `signal-sqlite`: it opens Signal's database itself, read-only.
+# Optional: only the `sqlite` feature pulls it in.
+rusqlite = { version = "0.43", features = ["bundled-sqlcipher", "serialize"], optional = true }
+# SQLCipher's crypto is crates/sqlcipher-rustcrypto (RustCrypto, no OpenSSL or
+# CommonCrypto), so every target cross-compiles from any host. The feature is
+# added by our copy of libsqlite3-sys in vendor/ (see [patch.crates-io]).
+libsqlite3-sys = { version = "0.40", features = ["bundled-sqlcipher-custom-crypto"], optional = true }
+
+# Subcommand CLI framework for `signal-sqlite` (query/tables/schema/repl/mcp).
+# Pure Rust, cross-compiles to every target; gated with rusqlite behind `sqlite`
+# so the default build and `SignalDecryption` stay dependency-light.
+clap = { version = "4", features = ["derive"], optional = true }
+
+[features]
+# `signal-sqlite` needs a SQLite engine and its subcommand CLI; `SignalDecryption`
+# needs neither. Gating both keeps the default build (and SignalDecryption) free
+# of the C SQLite and the clap dependency tree.
+sqlite = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:clap"]
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 # os_crypt PRF (macOS/Linux only): PBKDF2-HMAC-SHA1.
@@ -58,7 +83,8 @@ aes-gcm = "0.10"  # The aes-gcm crate, version 0.10
 base64 = "0.22"  # The base64 crate, version 0.22
 
 # Win32 DPAPI bindings (CryptUnprotectData) and LocalFree
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# (+ CreateFileW with an owner-only DACL for signal-sqlite's plaintext export)
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 [profile.release]
 # Release profile optimizations
@@ -71,3 +97,14 @@ strip = true  # Remove symbols from the final binary to reduce size
 debug = false  # Disable debug information to reduce binary size and remove source file references
 incremental = false  # Disable incremental compilation for release builds to improve runtime performance at the cost of longer compile times
 overflow-checks = false  # Disable overflow checks in release builds to improve performance; this should only be done if you're sure overflows won't occur
+
+# libsqlite3-sys 0.40.0 from crates.io plus the `bundled-sqlcipher-custom-crypto`
+# feature; vendor/README.md lists every change.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
+
+# The crypto provider is a member so `cargo test -p sqlcipher-rustcrypto` runs
+# its known-answer tests; the vendored crate is not ours to lint or test.
+[workspace]
+members = ["crates/sqlcipher-rustcrypto"]
+exclude = ["vendor"]

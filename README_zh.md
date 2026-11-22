@@ -4,7 +4,12 @@
 
 ## 概述 🌟
 
-`SignalDecryption` 是一个支持 **macOS、Windows 和 Linux** 的 Rust 命令行工具,从 Signal Desktop 的加密配置中恢复其 SQLCipher 数据库密钥。它通过实现 Chromium 的 `os_crypt` 方案恢复密钥——该方案在不同平台上完全不同:
+本项目提供两个 Rust 命令行工具,支持 **macOS、Windows 和 Linux**:
+
+- **`SignalDecryption`** —— 从 Signal Desktop 的加密配置中恢复其 SQLCipher 数据库密钥。
+- **`signal-sqlite`** —— 用自动恢复的密钥打开 Signal 的加密数据库,直接写 SQL 查询,全程不碰密钥。它用 **SQLCipher 本身**以只读方式打开数据库,和 Signal 用的是同一个引擎,所以 WAL、锁和 checkpoint 的行为与 Signal 自己的读连接完全一致。见 [查询数据库](#查询数据库-signal-sqlite-)。
+
+两者共享一个 `signal_core` 库,通过实现 Chromium 的 `os_crypt` 方案恢复密钥——该方案在不同平台上完全不同:
 
 - **macOS**:从钥匙串读取 "Safe Storage" 口令,经 PBKDF2-HMAC-SHA1(1003 次迭代)派生,再用 AES-128-CBC 解密 `config.json` 的 `encryptedKey`(前缀 `v10`)。
 - **Windows**:从 `Local State`(`os_crypt.encrypted_key`)读取主密钥,通过 **DPAPI**(`CryptUnprotectData`,用户作用域)解包,再用 AES-256-GCM 解密 `config.json` 的 `encryptedKey`(前缀 `v10`)。由于 DPAPI 用户作用域密钥绑定登录用户,本工具必须**以拥有该 Signal 配置的 Windows 用户身份运行**。
@@ -21,6 +26,8 @@
 - 🪟 支持 Windows ARM64 与 x64 二进制(在 Windows 上构建,MSVC ABI,无需 Visual C++ 运行库)
 - 🐧 静态 musl Linux 二进制(x64,任意发行版可跑,不与 glibc 耦合;Signal Desktop 在 Linux 上仅发行 x64)
 - 🛠️ macOS 与 Linux 产物在 macOS 上构建(Linux 为交叉编译);Windows 产物在 Windows 上构建
+- 🗄️ `signal-sqlite` 直接查询 Signal 数据库(由 SQLCipher 以只读方式打开,Signal 运行时也安全),用户不碰密钥
+- 🤖 `signal-sqlite mcp` 以只读 MCP server 把数据库暴露给 AI agent(只恢复一次密钥;仅 `SELECT`、禁 `ATTACH`、结果封顶)
 
 ## 前提条件 📋
 
@@ -162,6 +169,95 @@ SignalDecryption [选项]
    ```
    ./SignalDecryption -p
    ```
+
+## 查询数据库 (signal-sqlite) 🗄️
+
+`signal-sqlite` 恢复密钥,用 **SQLCipher 本身**以只读方式打开 Signal 的数据库,作为 Signal 自己连接之外的又一个读者;WAL 里的最新数据也包括在内。解密后的页只存在于 SQLCipher 的内存里,不落盘。数据库和 WAL 都不会被写入(和所有 SQLite 读者一样,它会更新共享的 `-shm` 索引)。它是子命令式 CLI:选一个模式(`query`、`tables`、`schema`、`repl`、`mcp`),不给子命令则进交互式提示符。
+
+```
+signal-sqlite [全局选项] <命令>
+
+命令:
+  query <SQL>     跑一条只读 SQL
+  tables          列出所有表
+  schema [TABLE]  显示 CREATE 语句(全部,或仅某表)
+  repl            交互式 SQL 提示符(也是无命令时的默认)
+  mcp             作为只读 MCP server 运行(stdio,给 AI agent)
+  export <PATH>   把解密后的数据库导出成明文 SQLite 文件(--force 覆盖)
+
+全局选项(对任何会开库的命令生效):
+  -c, --config PATH  Signal config.json 路径(定位数据库与密钥)
+  -d, --db PATH      db.sqlite 路径(覆盖默认位置)
+  -k, --key HEX      直接使用该 64-hex 密钥(跳过自动恢复)
+
+输出行的命令(query/tables/repl)另可加 --json 或 --csv,以及
+--blob <summary|hex>(默认 summary = `<N bytes>`;hex 无损输出原始字节,
+如 `query --blob hex "SELECT data FROM ..." | ...`)。
+```
+
+### 示例
+
+```
+signal-sqlite tables
+signal-sqlite query "SELECT id FROM conversations LIMIT 5"
+signal-sqlite query --json "SELECT * FROM items"
+signal-sqlite schema messages
+signal-sqlite export signal.sqlite    # 一份可用任意 SQLite 工具打开的解密副本
+signal-sqlite                         # 交互式提示符(repl)
+signal-sqlite --help                  # 完整帮助;`signal-sqlite help <命令>` 看单命令
+```
+
+> **`export` 导出的是明文副本。** 该文件以明文保存你的全部消息。它以属主可读写(Unix 上 `0600`)创建,且不加 `--force` 不会覆盖已有文件;但它终究是落盘的明文——请妥善保管并在用完后删除。
+
+> **注意:** Signal Desktop 运行时也可以放心查询:SQLCipher 对 WAL 和锁的处理与 Signal 自己的读连接完全一样,每条语句看到的都是同一个已提交状态,Signal 的写入照常进行。
+>
+> **全文检索表:** Signal 的消息正文在 `messages` 表里;`messages_fts` 等是用 Signal 自带的 `signal_tokenizer` 声明的 FTS5 检索索引,而该分词器只存在于 Signal 进程内。`signal-sqlite` 会把这个分词器名注册为内置 `unicode61` 的别名,使这些表能打开、能读取(`MATCH` 以 unicode61 语义工作,与 Signal 的接近)。
+
+### 作为 MCP server 对接 AI agent 🤖
+
+`signal-sqlite mcp` 以 stdio 运行一个**只读**的 [Model Context Protocol](https://modelcontextprotocol.io) server,让支持 MCP 的 agent 用自然语言查询你的 Signal 历史。它在进程生命周期内**只恢复一次密钥**——因此不像逐条命令那样每次查询都重新弹系统钥匙串——以只读方式保持数据库打开,并暴露四个只读工具:
+
+- `list_tables` —— 列出所有表
+- `describe_schema` —— `CREATE` 语句(全部对象,或指定某表)
+- `search_messages` —— 全文检索(FTS5 `MATCH`),返回 id、会话、时间戳和片段,按时间倒序
+- `query` —— 一条只读 `SELECT`/`WITH` 语句,返回有行数上限的 JSON
+
+**加固**:连接以只读方式打开、禁用 `ATTACH`、只接受 `SELECT`/`WITH` 语句、每次结果都有行数上限(默认 200,硬上限 2000)。
+
+MCP 客户端配置示例(如 Claude Desktop 的 `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "signal": {
+      "command": "/absolute/path/to/signal-sqlite",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Claude Code** 用一条命令登记同一个 server(stdio；`--` 把子进程与 Claude 自己的参数分开):
+
+```
+claude mcp add signal -- /absolute/path/to/signal-sqlite mcp
+```
+
+不接客户端也能自测——它会回一段 JSON 的 `serverInfo`,随后(对 `tools/list`)返回四个工具:
+
+```
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | /absolute/path/to/signal-sqlite mcp
+```
+
+> **⚠️ 隐私——接入云端 agent 前务必先读。** 这些工具会返回你真实的消息内容。把本 server 接到**云端** LLM,等于把私密的 Signal 消息发到第三方机器上。优先用**本地**模型(如通过 Ollama),让数据不出设备;只有在你接受这个取舍时才接入托管 agent。工具默认对原始 `BLOB` 载荷做摘要(`<N bytes>`)并限制结果大小;只有调用方显式传入 `blob: "hex"` 时,`query` 才会以十六进制输出原始字节,且它仍会读取你指定的任何列。
+
+### 构建 signal-sqlite
+
+`signal-sqlite` 会引入 SQLCipher(由 cargo 从源码构建,加密实现是纯 Rust 的 `crates/sqlcipher-rustcrypto`,不用 OpenSSL 或 CommonCrypto),因此用 `sqlite` 这个 cargo feature 门控,以保持 `SignalDecryption` 精简。`build_*.sh` 脚本会同时构建两个工具;手动构建:
+
+```
+cargo build --release --features sqlite        # 同时构建 SignalDecryption 与 signal-sqlite
+```
 
 ## 安全考虑 🔒
 

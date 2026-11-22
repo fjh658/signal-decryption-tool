@@ -29,6 +29,9 @@ pub mod oscrypt_cbc;
 
 pub mod platform;
 
+// Long-path-safe paths for the few raw Win32 calls.
+pub mod winpath;
+
 pub use decryptor::Decryptor;
 
 /// Crate-wide result type. A boxed error is enough here: errors are only ever

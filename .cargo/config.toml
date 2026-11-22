@@ -4,3 +4,10 @@
 # package.sh refuses to ship an exe that imports anything but system DLLs.
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# SQLCipher 4.6+ logs warnings and errors by default (stderr off Apple and
+# Android), so a wrong key would print its "hmac check failed" lines next to
+# ours. signal-sqlite reports every failure itself; `PRAGMA cipher_log` can
+# still turn the log on when debugging.
+[env]
+LIBSQLITE3_FLAGS = "-DSQLCIPHER_OMIT_DEFAULT_LOGGING"

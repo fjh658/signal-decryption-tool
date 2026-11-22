@@ -4,7 +4,12 @@ English | [中文](README_zh.md)
 
 ## Overview 🌟
 
-`SignalDecryption` is a Rust command-line tool for **macOS, Windows and Linux** that recovers Signal Desktop's SQLCipher database key from its encrypted configuration. It implements Chromium's `os_crypt` scheme, which differs per platform:
+This project provides two Rust command-line tools for **macOS, Windows and Linux**:
+
+- **`SignalDecryption`** — recovers Signal Desktop's SQLCipher database key from its encrypted configuration.
+- **`signal-sqlite`** — opens Signal's encrypted database with the automatically recovered key and lets you run SQL directly, so you never handle the key yourself. It opens the database with **SQLCipher itself**, read-only, the same engine Signal uses, so the WAL, locking and checkpoints behave exactly as for Signal's own readers. See [Querying the database](#querying-the-database-signal-sqlite-).
+
+Both share a `signal_core` library that recovers the key by implementing Chromium's `os_crypt` scheme, which differs per platform:
 
 - **macOS**: the "Safe Storage" password is read from the Keychain, run through PBKDF2-HMAC-SHA1 (1003 iterations), and used to AES-128-CBC-decrypt `config.json`'s `encryptedKey` (prefix `v10`).
 - **Windows**: the master key is read from `Local State` (`os_crypt.encrypted_key`), unwrapped via **DPAPI** (`CryptUnprotectData`, user scope), and used to AES-256-GCM-decrypt `config.json`'s `encryptedKey` (prefix `v10`). Because DPAPI user-scope keys are bound to the logged-in user, the tool must run **as the Windows user that owns the Signal profile**.
@@ -21,6 +26,8 @@ English | [中文](README_zh.md)
 - 🪟 Windows binaries for both ARM64 and x64 (built on Windows, MSVC ABI, no Visual C++ runtime needed)
 - 🐧 Static musl Linux binary for x64 (runs on any distro, no glibc coupling; Signal Desktop on Linux is x64-only)
 - 🛠️ macOS and Linux artifacts build from macOS (Linux by cross-compilation); Windows builds on Windows
+- 🗄️ `signal-sqlite` queries Signal's database directly (opened read-only by SQLCipher, safe while Signal runs), no key handling by the user
+- 🤖 `signal-sqlite mcp` exposes the database to AI agents as a read-only MCP server (recovers the key once; `SELECT`-only, `ATTACH` disabled, results capped)
 
 ## Prerequisites 📋
 
@@ -162,6 +169,95 @@ Options:
    ```
    ./SignalDecryption -p
    ```
+
+## Querying the database (signal-sqlite) 🗄️
+
+`signal-sqlite` recovers the key and opens Signal's database with **SQLCipher itself**, read-only, as one more reader beside Signal's own connections; recent data in the WAL is included. Decrypted pages exist only in SQLCipher's memory, never on disk. The database and its WAL are never written (like any SQLite reader, it updates the shared `-shm` index). It is a subcommand CLI: pick a mode (`query`, `tables`, `schema`, `repl`, `mcp`), with no subcommand dropping into the interactive prompt.
+
+```
+signal-sqlite [GLOBAL OPTIONS] <COMMAND>
+
+Commands:
+  query <SQL>     Run a single read-only SQL statement
+  tables          List the user tables
+  schema [TABLE]  Show CREATE statements (all objects, or just one table)
+  repl            Interactive SQL prompt (also the default with no command)
+  mcp             Run as a read-only MCP server over stdio (for AI agents)
+  export <PATH>   Write the decrypted database to a plaintext SQLite file (--force to overwrite)
+
+Global options (apply to any command that opens the database):
+  -c, --config PATH  Path to Signal's config.json (locates the DB and key)
+  -d, --db PATH      Path to db.sqlite (overrides the default location)
+  -k, --key HEX      Use this 64-hex key directly (skip automatic recovery)
+
+The row-rendering commands (query/tables/repl) also take --json or --csv, and
+--blob <summary|hex> (default summary = `<N bytes>`; hex emits the raw bytes
+losslessly, e.g. `query --blob hex "SELECT data FROM ..." | ...`).
+```
+
+### Examples
+
+```
+signal-sqlite tables
+signal-sqlite query "SELECT id FROM conversations LIMIT 5"
+signal-sqlite query --json "SELECT * FROM items"
+signal-sqlite schema messages
+signal-sqlite export signal.sqlite    # a decrypted copy you can open in any SQLite tool
+signal-sqlite                         # interactive prompt (repl)
+signal-sqlite --help                  # full help; `signal-sqlite help <cmd>` per command
+```
+
+> **`export` writes an unencrypted copy.** The resulting file holds all your messages in the clear. It is created owner-only (`0600` on Unix) and will not overwrite an existing file without `--force`, but it is still plaintext on disk — store it somewhere safe and delete it when you are done.
+
+> **Note:** Querying while Signal Desktop runs is safe: SQLCipher handles the WAL and its locking exactly as for Signal's own readers, so every statement sees one committed state while Signal's writes carry on.
+>
+> **Full-text tables:** Signal's message text lives in the `messages` table; `messages_fts` and friends are FTS5 search indexes declared with Signal's custom `signal_tokenizer`, which only exists inside Signal. `signal-sqlite` registers that tokenizer name as an alias for SQLite's built-in `unicode61` so those tables open and can be read (and `MATCH` works with unicode61 semantics, close to Signal's).
+
+### signal-sqlite as an MCP server (AI agents) 🤖
+
+`signal-sqlite mcp` runs as a read-only [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, so an MCP-capable agent can query your Signal history conversationally. It recovers the key **once** for the life of the process — so, unlike per-command runs, it does not re-prompt the OS keychain on every query — keeps the database open read-only, and exposes four read-only tools:
+
+- `list_tables` — list the tables
+- `describe_schema` — `CREATE` statements (all objects, or one table)
+- `search_messages` — full-text search (FTS5 `MATCH`) returning id, conversation, timestamp and a snippet, newest first
+- `query` — a read-only `SELECT`/`WITH` statement, returning bounded JSON rows
+
+**Hardening:** the connection is opened read-only, `ATTACH` is disabled, only `SELECT`/`WITH` statements are accepted, and every result is row-capped (default 200, hard cap 2000).
+
+Example configuration for an MCP client (e.g. Claude Desktop's `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "signal": {
+      "command": "/absolute/path/to/signal-sqlite",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For **Claude Code**, register the same server with one command (stdio transport; the `--` separates the subprocess from Claude's own flags):
+
+```
+claude mcp add signal -- /absolute/path/to/signal-sqlite mcp
+```
+
+You can smoke-test the server with no client — it replies with a JSON `serverInfo` and then (on `tools/list`) the four tools:
+
+```
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | /absolute/path/to/signal-sqlite mcp
+```
+
+> **⚠️ Privacy — read this before connecting a cloud agent.** These tools return your real message content. Pairing this server with a **cloud** LLM sends private Signal messages off your machine to a third party. Prefer a **local** model (e.g. served via Ollama) so nothing leaves the device; connect a hosted agent only if you accept that trade-off. The tools summarize raw `BLOB` payloads by default (`<N bytes>`) and cap result sizes; `query` only emits raw blob bytes (as hex) when the caller explicitly passes `blob: "hex"`, and will read any column you ask it for.
+
+### Building signal-sqlite
+
+`signal-sqlite` pulls in SQLCipher (built from source by cargo, with a pure-Rust crypto provider, `crates/sqlcipher-rustcrypto`, instead of OpenSSL or CommonCrypto), so it is gated behind the `sqlite` cargo feature to keep `SignalDecryption` lean. The `build_*.sh` scripts build both tools; to build by hand:
+
+```
+cargo build --release --features sqlite        # builds SignalDecryption + signal-sqlite
+```
 
 ## Security Considerations 🔒
 

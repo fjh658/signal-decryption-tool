@@ -1,0 +1,19 @@
+[package]
+name = "sqlcipher-rustcrypto"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "SQLCipher crypto provider (SQLCIPHER_CRYPTO_CUSTOM) on RustCrypto: AES-256-CBC, HMAC and PBKDF2 over SHA-1/256/512, and the OS random generator"
+
+# Linked by the vendored libsqlite3-sys (feature bundled-sqlcipher-custom-crypto),
+# so SQLCipher needs no OpenSSL or CommonCrypto and every target cross-compiles.
+# `zeroize` wipes key schedules and HMAC state when they are dropped.
+[dependencies]
+aes = { version = "0.9", features = ["zeroize"] }
+cbc = { version = "0.2", default-features = false, features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
+sha1 = { version = "0.11", default-features = false, features = ["zeroize"] }
+sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+getrandom = "0.4"
