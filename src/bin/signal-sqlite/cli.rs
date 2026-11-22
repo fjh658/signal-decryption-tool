@@ -44,6 +44,28 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = CipherArg::Desktop)]
     pub cipher: CipherArg,
 
+    /// Decrypt a Signal ANDROID encrypted backup (.backup) instead of a live
+    /// SQLCipher database. This is the no-root path to Android data: it needs
+    /// only the file and its 30-digit passphrase. An alternative source to
+    /// -d/-k/--cipher (which are for live databases and are ignored here).
+    #[arg(long, global = true, value_name = "FILE", conflicts_with_all = ["db", "key", "config"])]
+    pub backup: Option<String>,
+
+    /// Passphrase for --backup (the 30-digit code; spaces are optional). If
+    /// omitted, you are prompted on stdin so the code stays out of your shell
+    /// history and the process list.
+    /// Required with `mcp`, whose stdin carries the protocol.
+    #[arg(long, global = true, value_name = "CODE")]
+    pub passphrase: Option<String>,
+
+    /// Read the --backup passphrase from FILE instead (surrounding whitespace is
+    /// ignored). Unlike --passphrase it stays out of the process list, and unlike
+    /// the prompt it works with `mcp`.
+    /// UTF-8 or UTF-16, with or without a BOM (as Windows editors and
+    /// PowerShell's `>` write it).
+    #[arg(long, global = true, value_name = "FILE", conflicts_with = "passphrase")]
+    pub passphrase_file: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -298,6 +320,38 @@ mod tests {
         assert_eq!(parse(&["tables"]).cipher, CipherArg::Desktop);
         assert_eq!(parse(&["--cipher", "ios", "tables"]).cipher, CipherArg::Ios);
         assert_eq!(parse(&["tables", "--cipher", "android"]).cipher, CipherArg::Android);
+    }
+
+    #[test]
+    fn backup_and_passphrase_parse() {
+        let cli = parse(&["--backup", "/b.backup", "--passphrase", "1 2 3", "tables"]);
+        assert_eq!(cli.backup.as_deref(), Some("/b.backup"));
+        assert_eq!(cli.passphrase.as_deref(), Some("1 2 3"));
+        // Passphrase is optional (prompted on stdin when absent).
+        assert_eq!(parse(&["--backup", "/b.backup", "tables"]).passphrase, None);
+    }
+
+    #[test]
+    fn passphrase_file_parses_and_conflicts_with_passphrase() {
+        let cli = parse(&["--backup", "/b.backup", "--passphrase-file", "/p.txt", "mcp"]);
+        assert_eq!(cli.passphrase_file.as_deref(), Some("/p.txt"));
+        let both = ["signal-sqlite", "--backup", "/b", "--passphrase", "1", "--passphrase-file", "/p", "tables"];
+        assert!(Cli::try_parse_from(both).is_err(), "two passphrase sources should conflict");
+    }
+
+    #[test]
+    fn backup_conflicts_with_db_key_and_config() {
+        for conflicting in [
+            ["--backup", "/b", "-d", "/db"].as_slice(),
+            ["--backup", "/b", "-k", "00"].as_slice(),
+            ["--backup", "/b", "-c", "/c.json"].as_slice(),
+        ] {
+            let argv = std::iter::once("signal-sqlite").chain(conflicting.iter().copied());
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "--backup with {conflicting:?} should conflict"
+            );
+        }
     }
 
     #[test]

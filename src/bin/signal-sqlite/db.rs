@@ -1,11 +1,13 @@
 //! Opening Signal's database: recover the key and open the database with
 //! SQLCipher itself, read-only, as one more reader next to Signal's own
-//! connections.
+//! connections. An Android `.backup` is rebuilt into an in-memory image instead.
 
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, ErrorCode, OpenFlags};
+use signal_core::android_backup::{self, Passphrase};
 use signal_core::error::Error;
 use signal_core::{platform, recover_key, Result};
 
@@ -18,9 +20,11 @@ const DB_HINT: &str = "start Signal Desktop once so it creates its database, or 
 
 /// An open, decrypted Signal database.
 ///
-/// The database is read in place by SQLCipher, whose page cache is the only
-/// place plaintext exists. No plaintext is ever written to disk, so there is
-/// nothing to clean up and no temp file another local user could read.
+/// A live database is read in place by SQLCipher, whose page cache is the only
+/// place plaintext exists; a `.backup` is held entirely in memory (mounted
+/// read-only via `sqlite3_deserialize`). No plaintext is ever written to disk,
+/// so there is nothing to clean up and no temp file another local user could
+/// read.
 pub struct SignalDb {
     pub conn: Connection,
 }
@@ -194,6 +198,53 @@ fn key_pragmas(key_hex: &str, cipher: CipherArg) -> Result<String> {
             "PRAGMA key = '{key_hex}'; PRAGMA cipher_compatibility = 3; PRAGMA kdf_iter = 1; PRAGMA cipher_page_size = 4096;"
         ),
     })
+}
+
+/// Opens a Signal **Android** encrypted backup (`.backup`) read-ready.
+///
+/// Streams the backup through the pure-Rust decryptor ([`android_backup`]),
+/// rebuilds its database into an in-memory plaintext image (attachments are
+/// skipped), and mounts that image read-only — exactly like the live-database
+/// path, so every command works unchanged. Nothing is written to disk.
+///
+/// The passphrase is the 30-digit code Signal shows when enabling backups; if
+/// not supplied on the command line it is read from stdin so it never lands in
+/// the process list or shell history.
+pub fn open_backup(backup_path: &str, passphrase: Option<Passphrase>) -> Result<SignalDb> {
+    let passphrase = match passphrase {
+        Some(code) => code,
+        None => prompt_passphrase()?,
+    };
+
+    let file = std::fs::File::open(backup_path)
+        .map_err(|e| format!("cannot open backup {backup_path}: {e}"))?;
+    let outcome = android_backup::rebuild_to_image(BufReader::new(file), &passphrase)?;
+
+    // Surface non-fatal problems and a one-line summary on stderr (never stdout,
+    // so piped query output stays clean).
+    for warning in &outcome.warnings {
+        eprintln!("warning: {warning}");
+    }
+    eprintln!(
+        "rebuilt database from backup: {} statements run, {} skipped, across {} frames",
+        outcome.statements_run, outcome.statements_skipped, outcome.frames
+    );
+
+    let conn = crate::fts::open_in_memory(&outcome.image)?;
+    Ok(SignalDb { conn })
+}
+
+/// Reads the backup passphrase from stdin, prompting on stderr. Keeping it off
+/// the command line keeps it out of `ps` output and shell history.
+fn prompt_passphrase() -> Result<Passphrase> {
+    eprint!("Backup passphrase (30 digits): ");
+    io::stderr().flush().ok();
+    // Bytes, not a String: a piped file may be UTF-16 (see `Passphrase`).
+    let mut line = Vec::new();
+    if io::stdin().lock().read_until(b'\n', &mut line)? == 0 {
+        return Err("no passphrase provided (stdin closed); pass --passphrase".into());
+    }
+    Ok(Passphrase::from_bytes(&line)?)
 }
 
 /// Resolves the config path, defaulting to the platform location.

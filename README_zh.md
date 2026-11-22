@@ -27,6 +27,8 @@
 - 🐧 静态 musl Linux 二进制(x64,任意发行版可跑,不与 glibc 耦合;Signal Desktop 在 Linux 上仅发行 x64)
 - 🛠️ macOS 与 Linux 产物在 macOS 上构建(Linux 为交叉编译);Windows 产物在 Windows 上构建
 - 🗄️ `signal-sqlite` 直接查询 Signal 数据库(由 SQLCipher 以只读方式打开,Signal 运行时也安全),用户不碰密钥
+- 📱 也能开 Signal **iOS** 与 **Android** 数据库(`--cipher ios|android`),用设备上取出的密钥
+- 📦 纯 Rust 解密 Signal **Android 加密备份**(`--backup`,无需 root),全程在内存里重建
 - 🤖 `signal-sqlite mcp` 以只读 MCP server 把数据库暴露给 AI agent(只恢复一次密钥;仅 `SELECT`、禁 `ATTACH`、结果封顶)
 
 ## 前提条件 📋
@@ -188,7 +190,11 @@ signal-sqlite [全局选项] <命令>
 全局选项(对任何会开库的命令生效):
   -c, --config PATH  Signal config.json 路径(定位数据库与密钥)
   -d, --db PATH      db.sqlite 路径(覆盖默认位置)
-  -k, --key HEX      直接使用该 64-hex 密钥(跳过自动恢复)
+  -k, --key HEX      直接使用该密钥(跳过自动恢复)
+      --cipher WHICH  SQLCipher profile:desktop(默认)、ios 或 android
+      --backup FILE  改为解密 Signal Android 加密备份(无需 root)
+      --passphrase CODE  --backup 的 30 位口令(省略则在提示符处输入)
+      --passphrase-file FILE  从 FILE 读取该口令(可配合 mcp;不出现在 ps 里)
 
 输出行的命令(query/tables/repl)另可加 --json 或 --csv,以及
 --blob <summary|hex>(默认 summary = `<N bytes>`;hex 无损输出原始字节,
@@ -227,6 +233,25 @@ signal-sqlite --cipher android -d signal.db     -k <64位hex-secret>  tables
 
 `--cipher ios`/`android` 都**必须显式给 `-k`/`--key` 和 `-d`/`--db`**(本机没有可自动恢复的东西)。开库之后,所有命令照常用——`query`、`tables`、`schema`、`repl`、`mcp`、`export`。SQLCipher 按各客户端自己的设置打开它们(iOS:SQLCipher 4 加 32 字节明文头;Android:SQLCipher 3 兼容模式);测试 fixture 由 SQLCipher 4.20.0 按这些设置生成。**从现代设备上取出密钥需要设备上的访问权限(越狱 / root);普通数据线既读不到被封装的密钥,也读不到沙盒里的数据库**——这是 Signal 的设计,不是本工具的局限。
 
+### Android 加密备份(.backup)—— 无需 root 📦
+
+Android 的**实时**数据库要 root(密钥封在 Keystore 里),但 Signal 自己的**加密备份**不用。在 Signal 里开启备份(设置 → 聊天 → 聊天备份)后,它会往手机存储写一个 `signal-YYYY-MM-DD-HH-MM-SS.backup` 文件,用一串**只显示一次的 30 位数字口令**保护。有这个文件加口令就够了——用数据线或 `adb pull` 拷出来即可,**不需要 root**。
+
+```
+# 用 --passphrase 传那串 30 位数字(空格可有可无)……
+signal-sqlite --backup signal-2026-11-16.backup --passphrase "12345 67890 ..." query "SELECT body FROM message LIMIT 20"
+
+# ……或者省略它、在提示符处输入(这样口令不进 shell 历史、也不出现在 ps 里):
+signal-sqlite --backup signal-2026-11-16.backup tables
+
+# ……或者放进只有自己可读的文件(同样不出现在 ps 里;配合 mcp 时用这种):
+signal-sqlite --backup signal-2026-11-16.backup --passphrase-file ~/.signal-backup-code tables
+```
+
+口令文件可以是 UTF-8 或 UTF-16,有无 BOM 都行(Windows 编辑器和 PowerShell 的 `>` 就会这样写)。除空格和换行外必须正好是 30 位数字,否则在解密前就会报错。
+
+`--backup` 是一个自包含的数据源:它**替代** `-d`/`-k`/`--cipher`(同时用会报错)。备份是**流式**纯 Rust 解密的(SHA-512 × 250,000 → HKDF-SHA256 → AES-256-CTR + HMAC-SHA256),其 SQL 帧被**全程在内存里**重放成数据库——不落盘。备份里的附件会被跳过(只重建消息数据库)。开库后所有命令照常用,包括想要落盘明文副本时的 `export`。已对 Signal-Android 备份格式(tag 8.36.2)核实,并在 macOS 与 Linux x86_64 上实跑验证。
+
 ### 作为 MCP server 对接 AI agent 🤖
 
 `signal-sqlite mcp` 以 stdio 运行一个**只读**的 [Model Context Protocol](https://modelcontextprotocol.io) server,让支持 MCP 的 agent 用自然语言查询你的 Signal 历史。它在进程生命周期内**只恢复一次密钥**——因此不像逐条命令那样每次查询都重新弹系统钥匙串——以只读方式保持数据库打开,并暴露四个只读工具:
@@ -256,6 +281,8 @@ MCP 客户端配置示例(如 Claude Desktop 的 `claude_desktop_config.json`):
 ```
 claude mcp add signal -- /absolute/path/to/signal-sqlite mcp
 ```
+
+要让 server 打开 live 桌面库以外的数据源,把常用参数放在 `mcp` 前面,例如 `signal-sqlite --backup /path/to/signal.backup --passphrase-file /path/to/code.txt mcp`(配合 `mcp` 时必须给 `--passphrase-file` 或 `--passphrase`:stdin 承载的是协议,没法在那里提示输入;优先用文件,`--passphrase` 会出现在 `ps` 和客户端配置里)或 `signal-sqlite --cipher ios -k <hex> -d /path/to/db mcp`。
 
 不接客户端也能自测——它会回一段 JSON 的 `serverInfo`,随后(对 `tools/list`)返回四个工具:
 

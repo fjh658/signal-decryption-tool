@@ -527,3 +527,196 @@ fn mobile_cipher_without_key_is_an_error() {
     assert!(!out.status.success(), "mobile cipher without --key should fail");
     assert!(String::from_utf8_lossy(&out.stderr).to_lowercase().contains("key"));
 }
+
+// --- Android encrypted backup (.backup) decryption through the CLI -----------
+
+/// Passphrase and rows baked into the committed `src/testdata/android.backup`
+/// fixture (see `generate_cli_fixture` in `src/android_backup.rs`).
+const BACKUP_PASSPHRASE: &str = "11111 22222 33333 44444 55555 66666";
+
+#[test]
+fn android_backup_queries_through_the_cli() {
+    let backup = testdata("android.backup");
+    let out = Command::new(BIN)
+        .args(["--backup", backup.to_str().unwrap(), "--passphrase", BACKUP_PASSPHRASE])
+        .args(["query", "SELECT name FROM items ORDER BY id"])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // "delta" is the row AFTER the attachment blob — it proves the per-blob
+    // counter stayed aligned all the way through the CLI path.
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        assert!(stdout.contains(name), "missing '{name}':\n{stdout}");
+    }
+}
+
+#[test]
+fn android_backup_reads_passphrase_from_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let backup = testdata("android.backup");
+    let mut child = Command::new(BIN)
+        .args(["--backup", backup.to_str().unwrap()])
+        .args(["query", "SELECT count(*) AS n FROM items"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    // No --passphrase on the command line: it must be read from stdin.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{BACKUP_PASSPHRASE}\n").as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains('4'), "expected 4 rows");
+}
+
+#[test]
+fn android_backup_wrong_passphrase_is_an_error() {
+    let backup = testdata("android.backup");
+    let out = Command::new(BIN)
+        .args(["--backup", backup.to_str().unwrap(), "--passphrase", "00000 00000 00000 00000 00000 00000"])
+        .args(["tables"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "a wrong passphrase must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).to_lowercase().contains("passphrase"),
+        "error should mention the passphrase:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn backup_mcp_without_passphrase_fails_before_touching_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    // stdin carries the MCP protocol, so the passphrase prompt must not run:
+    // the client's `initialize` line would be consumed as the passphrase.
+    let backup = testdata("android.backup");
+    let mut child = Command::new(BIN)
+        .args(["--backup", backup.to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    // The child may already have exited (that is the point), so a broken pipe
+    // here is fine.
+    let _ = child.stdin.take().unwrap().write_all(
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+    );
+    let out = child.wait_with_output().expect("wait");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "must refuse to start");
+    assert!(stderr.contains("--passphrase"), "error should name --passphrase:\n{stderr}");
+    assert!(!stderr.contains("Backup passphrase"), "must not prompt on protocol stdin:\n{stderr}");
+}
+
+/// Writes the fixture passphrase (with a trailing newline, as an editor would)
+/// to a temp file and returns its path.
+fn passphrase_file(tag: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("sqlite_pass_{tag}_{}.txt", std::process::id()));
+    std::fs::write(&path, format!("{BACKUP_PASSPHRASE}\n")).unwrap();
+    path
+}
+
+#[test]
+fn android_backup_reads_passphrase_from_a_file() {
+    let pass = passphrase_file("query");
+    let out = Command::new(BIN)
+        .args(["--backup", testdata("android.backup").to_str().unwrap()])
+        .args(["--passphrase-file", pass.to_str().unwrap()])
+        .args(["query", "SELECT count(*) AS n FROM items"])
+        .output()
+        .expect("spawn");
+    let _ = std::fs::remove_file(&pass);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains('4'), "expected 4 rows");
+}
+
+#[test]
+fn backup_mcp_starts_with_a_passphrase_file() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let pass = passphrase_file("mcp");
+    let mut child = Command::new(BIN)
+        .args(["--backup", testdata("android.backup").to_str().unwrap()])
+        .args(["--passphrase-file", pass.to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n")
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    let _ = std::fs::remove_file(&pass);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains(r#""serverInfo""#), "initialize must be answered:\n{stdout}");
+}
+
+#[test]
+fn passphrase_files_from_windows_editors_and_shells_work() {
+    let text = format!("{BACKUP_PASSPHRASE}\r\n");
+    let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    for (tag, bytes) in [
+        ("bom", [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat()),
+        ("utf16", [&[0xFF, 0xFE][..], &utf16].concat()),
+    ] {
+        let pass = std::env::temp_dir().join(format!("sqlite_pass_{tag}_{}.txt", std::process::id()));
+        std::fs::write(&pass, bytes).unwrap();
+        let out = Command::new(BIN)
+            .args(["--backup", testdata("android.backup").to_str().unwrap()])
+            .args(["--passphrase-file", pass.to_str().unwrap(), "query", "SELECT count(*) AS n FROM items"])
+            .output()
+            .expect("spawn");
+        let _ = std::fs::remove_file(&pass);
+        assert!(out.status.success(), "{tag}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn malformed_passphrase_is_rejected_before_decrypting() {
+    let out = Command::new(BIN)
+        .args(["--backup", testdata("android.backup").to_str().unwrap(), "--passphrase", "12345 67890", "tables"])
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("30 digits") && !stderr.contains("12345 67890"), "{stderr}");
+}
+
+#[test]
+fn missing_passphrase_file_is_an_error() {
+    let out = Command::new(BIN)
+        .args(["--backup", testdata("android.backup").to_str().unwrap()])
+        .args(["--passphrase-file", "/nonexistent/pass.txt", "tables"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/nonexistent/pass.txt"));
+}
+
+#[test]
+fn backup_conflicts_with_live_database_flags() {
+    // --backup and -d name two different sources; clap must reject using both.
+    let out = Command::new(BIN)
+        .args(["--backup", "/x.backup", "-d", "/y.sqlite", "tables"])
+        .output()
+        .expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "conflicting sources should be a usage error");
+}

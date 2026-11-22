@@ -27,6 +27,8 @@ Both share a `signal_core` library that recovers the key by implementing Chromiu
 - 🐧 Static musl Linux binary for x64 (runs on any distro, no glibc coupling; Signal Desktop on Linux is x64-only)
 - 🛠️ macOS and Linux artifacts build from macOS (Linux by cross-compilation); Windows builds on Windows
 - 🗄️ `signal-sqlite` queries Signal's database directly (opened read-only by SQLCipher, safe while Signal runs), no key handling by the user
+- 📱 Opens Signal **iOS** and **Android** databases too (`--cipher ios|android`), with a device-extracted key
+- 📦 Decrypts Signal **Android encrypted backups** (`--backup`, no root needed) in pure Rust, rebuilt in memory
 - 🤖 `signal-sqlite mcp` exposes the database to AI agents as a read-only MCP server (recovers the key once; `SELECT`-only, `ATTACH` disabled, results capped)
 
 ## Prerequisites 📋
@@ -188,7 +190,11 @@ Commands:
 Global options (apply to any command that opens the database):
   -c, --config PATH  Path to Signal's config.json (locates the DB and key)
   -d, --db PATH      Path to db.sqlite (overrides the default location)
-  -k, --key HEX      Use this 64-hex key directly (skip automatic recovery)
+  -k, --key HEX      Use this key directly (skip automatic recovery)
+      --cipher WHICH SQLCipher profile: desktop (default), ios, or android
+      --backup FILE  Decrypt a Signal Android encrypted backup instead (no root)
+      --passphrase CODE  The 30-digit passphrase for --backup (else prompted)
+      --passphrase-file FILE  Read that passphrase from FILE (works with mcp; not in ps)
 
 The row-rendering commands (query/tables/repl) also take --json or --csv, and
 --blob <summary|hex> (default summary = `<N bytes>`; hex emits the raw bytes
@@ -227,6 +233,25 @@ signal-sqlite --cipher android -d signal.db     -k <64-hex-secret>  tables
 
 `--cipher ios`/`android` both require an explicit `-k`/`--key` and `-d`/`--db` (there is nothing to auto-recover here). Once open, every command works the same — `query`, `tables`, `schema`, `repl`, `mcp`, `export`. SQLCipher opens them with the same settings each client uses (SQLCipher 4 with a 32-byte plaintext header for iOS, SQLCipher 3 compatibility for Android); the test fixtures were made by SQLCipher 4.20.0 with those settings. **Getting the key off a modern device requires on-device access (jailbreak / root); a plain USB cable cannot read the sealed key or the sandboxed database** — that is Signal's design, not a limitation of this tool.
 
+### Android encrypted backups (.backup) — no root needed 📦
+
+The live Android database needs root (its key is sealed in the Keystore), but Signal's own **encrypted backup** does not. If you enable backups in Signal (Settings → Chats → Chat backups), it writes a `signal-YYYY-MM-DD-HH-MM-SS.backup` file to the phone's storage, protected by a **30-digit passphrase** it shows you once. That file plus the passphrase is everything needed — copy it off with a USB cable or `adb pull`, no root required.
+
+```
+# Pass the 30-digit code with --passphrase (spaces optional)...
+signal-sqlite --backup signal-2026-11-16.backup --passphrase "12345 67890 ..." query "SELECT body FROM message LIMIT 20"
+
+# ...or omit it and type it at the prompt (keeps it out of your shell history and ps):
+signal-sqlite --backup signal-2026-11-16.backup tables
+
+# ...or keep it in an owner-only file (also out of ps; the way to go for mcp):
+signal-sqlite --backup signal-2026-11-16.backup --passphrase-file ~/.signal-backup-code tables
+```
+
+The passphrase file may be UTF-8 or UTF-16, with or without a BOM (as Windows editors and PowerShell's `>` write it). Anything but 30 digits (spaces and line breaks aside) is rejected before decrypting.
+
+`--backup` is a self-contained source: it replaces `-d`/`-k`/`--cipher` (using them together is an error). The backup is streamed and decrypted in pure Rust (SHA-512 × 250,000 → HKDF-SHA256 → AES-256-CTR + HMAC-SHA256), and its SQL frames are replayed into a database held **entirely in memory** — nothing is written to disk. Attachments inside the backup are skipped (only the message database is rebuilt). Once open, every command works the same, including `export` if you want a plaintext copy on disk. Verified against the Signal-Android backup format (tag 8.36.2) and run on both macOS and Linux x86_64.
+
 ### signal-sqlite as an MCP server (AI agents) 🤖
 
 `signal-sqlite mcp` runs as a read-only [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, so an MCP-capable agent can query your Signal history conversationally. It recovers the key **once** for the life of the process — so, unlike per-command runs, it does not re-prompt the OS keychain on every query — keeps the database open read-only, and exposes four read-only tools:
@@ -256,6 +281,8 @@ For **Claude Code**, register the same server with one command (stdio transport;
 ```
 claude mcp add signal -- /absolute/path/to/signal-sqlite mcp
 ```
+
+To point the server at a source other than the live desktop database, put the usual flags before `mcp`, e.g. `signal-sqlite --backup /path/to/signal.backup --passphrase-file /path/to/code.txt mcp` (with `mcp`, `--passphrase-file` or `--passphrase` is required: stdin carries the protocol, so it cannot be prompted for; prefer the file, since `--passphrase` is visible in `ps` and in the client's config) or `signal-sqlite --cipher ios -k <hex> -d /path/to/db mcp`.
 
 You can smoke-test the server with no client — it replies with a JSON `serverInfo` and then (on `tools/list`) the four tools:
 

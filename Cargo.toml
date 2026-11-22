@@ -33,11 +33,13 @@ hex = "0.4.3"  # The hex crate, version 0.4.3
 serde_json = { version = "1.0", default-features = false, features = ["std"] }  # Enable `std` feature explicitly
 
 # --- Shared RustCrypto primitives ---
-# os_crypt (macOS/Linux) uses AES-128-CBC + PBKDF2-SHA1.
+# os_crypt (macOS/Linux) uses AES-128-CBC + PBKDF2-SHA1; the Android backup
+# (src/android_backup.rs) uses AES-256-CTR, HMAC-SHA256 and SHA-512.
 aes = "0.7.5"                                           # AES block cipher (128 + 256)
 block-modes = "0.8.1"                                   # CBC mode
 pbkdf2 = { version = "0.10", features = ["std"] }       # PBKDF2 key derivation
-hmac = "0.12.1"                                          # HMAC (SHA1)
+hmac = "0.12.1"                                          # HMAC (SHA1 and SHA256)
+sha2 = "0.10"                                            # SHA-256/512 (Android backup)
 
 # SQLCipher for `signal-sqlite`: it opens Signal's database itself, read-only.
 # Optional: only the `sqlite` feature pulls it in.
@@ -46,6 +48,15 @@ rusqlite = { version = "0.43", features = ["bundled-sqlcipher", "serialize"], op
 # CommonCrypto), so every target cross-compiles from any host. The feature is
 # added by our copy of libsqlite3-sys in vendor/ (see [patch.crates-io]).
 libsqlite3-sys = { version = "0.40", features = ["bundled-sqlcipher-custom-crypto"], optional = true }
+
+# --- Android encrypted-backup (.backup) offline decryption (src/android_backup.rs) ---
+# Signal Android backups use AES-256-CTR + HKDF-SHA256 (vs. the desktop os_crypt
+# CBC/GCM and SQLCipher paths). These two pure-Rust RustCrypto crates are the only
+# primitives we don't already have; same `cipher 0.3` generation as aes/block-modes,
+# so cross-compile stays intact. Optional: pulled in only by the `sqlite` feature,
+# because the backup is reconstructed into a (rusqlite) SQLite image for querying.
+ctr = { version = "0.8", optional = true }    # AES-CTR stream mode (we only had CBC)
+hkdf = { version = "0.12", optional = true }  # HKDF-SHA256 key split (libsignal "Backup Export")
 
 # Subcommand CLI framework for `signal-sqlite` (query/tables/schema/repl/mcp).
 # Pure Rust, cross-compiles to every target; gated with rusqlite behind `sqlite`
@@ -56,7 +67,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 # `signal-sqlite` needs a SQLite engine and its subcommand CLI; `SignalDecryption`
 # needs neither. Gating both keeps the default build (and SignalDecryption) free
 # of the C SQLite and the clap dependency tree.
-sqlite = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:clap"]
+sqlite = ["dep:rusqlite", "dep:libsqlite3-sys", "dep:clap", "dep:ctr", "dep:hkdf"]
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 # os_crypt PRF (macOS/Linux only): PBKDF2-HMAC-SHA1.

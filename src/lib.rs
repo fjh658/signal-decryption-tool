@@ -32,6 +32,12 @@ pub mod platform;
 // Long-path-safe paths for the few raw Win32 calls.
 pub mod winpath;
 
+// Offline decryption of Signal Android encrypted `.backup` files (AES-256-CTR +
+// HKDF-SHA256). Gated behind `sqlite` because it rebuilds the backup into a
+// (rusqlite) SQLite image for querying — the same consumer as `signal-sqlite`.
+#[cfg(feature = "sqlite")]
+pub mod android_backup;
+
 pub use decryptor::Decryptor;
 
 /// Crate-wide result type. A boxed error is enough here: errors are only ever
